@@ -1,0 +1,409 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+### Load Library
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(caret)
+library(vip)
+library(ROCR)
+library(rpart)
+library(randomForest)
+library(rpart.plot)
+library(e1071)
+library(ggthemes)
+library(corrplot)
+library(psych)
+```
+
+### Load data and remove
+```{r}
+cerv.df<-read.csv("sobar-72.csv")
+cerv2.df<-subset(cerv.df,select=-c(empowerment_knowledge, perception_severity))
+dv="ca_cervix"
+```
+
+### Categorical Variables
+
+```{r}
+c.df<-cerv2.df
+
+c.df$ca_cervix<-factor(c.df$ca_cervix, 
+                       levels = c(0,1), 
+                       labels = c("no","yes"))
+desc<-describe(c.df)
+desc
+```
+
+### Splitting
+```{r}
+set.seed(1337)
+index <- createDataPartition(c.df[, dv], p= 2/3, list=FALSE) 
+train.dat <- c.df[ index,] 
+test.dat <- c.df[-index,] 
+```
+
+### Cross Validate
+```{r}
+tr.Control <- trainControl(method = "repeatedcv",
+                           number = 10, repeats = 5,
+                           classProbs = TRUE,
+                           summaryFunction = twoClassSummary
+                           )
+```
+
+### Tree
+
+```{r}
+set.seed(1337)
+   tree.df <- train(ca_cervix ~ ., data = train.dat, 
+                         trControl = tr.Control,
+                         method = "rpart", 
+                         metric = "ROC",
+                         preProcess = c("center", "scale"),
+                         tuneGrid = expand.grid
+                             (cp= seq(0, 0.0001, length.out = 100)  
+                         ))
+
+
+    
+    #Variable importance
+    rpart.plot(tree.df$finalModel)
+    varImp(tree.df)
+    ggplot(varImp(tree.df))+
+      ggtitle("Tree Variable Importance")+
+      theme_excel_new()
+    
+    #Compare prediction
+    prob.pred.tree<-predict(tree.df,newdata = test.dat, type = "prob")
+    prob.pred.tree<-prob.pred.tree[,2]
+    prediction.list.tree <- prediction(prob.pred.tree, labels = test.dat$ca_cervix)
+    perf.tree <- performance(prediction.list.tree, measure="tpr", x.measure="fpr")
+    
+    #Best ROC
+    perf.tree.x <- perf.tree@x.values[[1]]
+    perf.tree.y <- perf.tree@y.values[[1]]
+    perf.tree.cutoff <- prediction.list.tree@cutoffs[[1]]
+    tree.acc <- performance(prediction.list.tree, measure="acc")
+    tree.accuracy <- tree.acc@y.values[[1]]
+    
+    #create dataframe:
+    roc.tree.df <- data.frame(sensitivity = perf.tree.y,
+                         FPR = perf.tree.x,
+                         specificity = 1- perf.tree.x,
+                         accuracy = tree.accuracy,
+                         prob.cutoff = perf.tree.cutoff )
+    
+    #get optimal threshold:
+    opt.threshold.index <-  which.max(roc.tree.df$specificity + roc.tree.df$sensitivity)
+
+    #Best result
+    tree.df$results[ which.max(tree.df$results$ROC), ]
+    
+    #display optimal threshold results:
+    roc.tree.df[opt.threshold.index, ]
+
+    #AUC
+    AUC.tree = as.numeric(performance(prediction.list.tree, "auc")@y.values)
+```
+
+
+### Elastic
+```{r}
+set.seed(1337)
+elastic.df<- train(ca_cervix ~ ., data = train.dat, 
+                 method = 'glmnet', 
+                 family="binomial",
+                 metric="ROC",
+                 trControl = tr.Control,
+                 preProc = c("center", "scale"),
+                 verbose = FALSE,
+                 tuneGrid =
+                     expand.grid(
+                         alpha = seq(0, 1, length.out = 10),
+                         lambda = seq(0, 0.5, length.out = 10))
+                 )
+
+  #Best result
+  elastic.df$results[ which.max(elastic.df$results$ROC), ]
+  
+  #Plot important variables
+  varImp(elastic.df)
+  ggplot(varImp(elastic.df))+
+    ggtitle("Elastic Net Variable Importance")+
+    theme_excel_new()
+
+ #Compare prediction
+    prob.pred.elastic<-predict(elastic.df,newdata = test.dat, type ="prob")
+    prob.pred.elastic<-prob.pred.elastic[,2]
+    prediction.list.elastic <- prediction(prob.pred.elastic, labels = test.dat$ca_cervix)
+    perf.elastic <- performance(prediction.list.elastic, measure="tpr", x.measure="fpr")
+    
+    #Best ROC
+    perf.elastic.x <- perf.elastic@x.values[[1]]
+    perf.elastic.y <- perf.elastic@y.values[[1]]
+    perf.elastic.cutoff <- prediction.list.elastic@cutoffs[[1]]
+    elastic.acc <- performance(prediction.list.elastic, measure="acc")
+    elastic.accuracy <- elastic.acc@y.values[[1]]
+    
+    #create dataframe:
+    roc.elastic.df <- data.frame(sensitivity = perf.elastic.y,
+                         FPR = perf.elastic.x,
+                         specificity = 1- perf.elastic.x,
+                         accuracy = elastic.accuracy,
+                         prob.cutoff = perf.elastic.cutoff )
+    
+    #get optimal threshold:
+    opt.threshold.index.elastic <-  which.max(roc.elastic.df$specificity + roc.elastic.df$sensitivity)
+    
+
+    
+    #display optimal threshold results:
+    roc.elastic.df[opt.threshold.index.elastic, ]
+
+    #AUC
+    AUC.elastic = as.numeric(performance(prediction.list.elastic, "auc")@y.values)
+```
+
+
+### Random Forest
+
+```{r}
+#for loop for ntree
+ntree.vec<-c(500,1000,2000,3000)
+ntree.df<-data.frame(matrix(ncol = 8, nrow = 0))
+colnames(ntree.df)<-c("mtry","ROC","Sens","Spec","ROCSD","SensSD","SpecSD","ntree")
+ii<-1
+for (i in ntree.vec){
+   set.seed(1337)
+   rf.df <- train(ca_cervix ~ ., data = train.dat, 
+                         trControl = tr.Control,
+                         method = "rf", 
+                         metric = "ROC",
+                         preProcess = c("center", "scale"),
+                         ntree=i,
+                         tuneGrid = 
+                         expand.grid(mtry = seq(1, ncol(train.dat)-1)  
+                         ))
+   aa<-rf.df$results[ which.max(rf.df$results$ROC), ]
+   aa$ntree<-i
+   ntree.df[ii,]<-aa
+   ii<-ii+1
+
+}
+
+ntree.df
+#Seems like mtry=1 and ntree=500 give the highest ROC and Spec
+   set.seed(1337)
+   rf.df <- train(ca_cervix ~ ., data = train.dat, 
+                         trControl = tr.Control,
+                         method = "rf", 
+                         metric = "ROC",
+                         preProcess = c("center", "scale"),
+                         ntree=500,
+                         tuneGrid = 
+                         expand.grid(mtry = 1)  
+                         )
+
+    
+    #Variable importance
+    varImp(rf.df)
+    ggplot(varImp(rf.df))+
+      ggtitle("Random Forest Variable Importance")+
+      theme_excel_new()
+    
+    #Compare prediction
+    prob.pred.rf<-predict(rf.df,newdata = test.dat, type = "prob")
+    prob.pred.rf<-prob.pred.rf[,2]
+    prediction.list.rf <- prediction(prob.pred.rf, labels = test.dat$ca_cervix)
+    perf.rf <- performance(prediction.list.rf, measure="tpr", x.measure="fpr")
+    
+    #Best ROC
+    perf.rf.x <- perf.rf@x.values[[1]]
+    perf.rf.y <- perf.rf@y.values[[1]]
+    perf.rf.cutoff <- prediction.list.rf@cutoffs[[1]]
+    rf.acc <- performance(prediction.list.rf, measure="acc")
+    rf.accuracy <- rf.acc@y.values[[1]]
+    
+    #create dataframe:
+    roc.rf.df <- data.frame(sensitivity = perf.rf.y,
+                         FPR = perf.rf.x,
+                         specificity = 1- perf.rf.x,
+                         accuracy = rf.accuracy,
+                         prob.cutoff = perf.rf.cutoff )
+    
+    #get optimal threshold:
+    opt.threshold.index <-  which.max(roc.rf.df$specificity + roc.rf.df$sensitivity)
+
+    
+    # rf best tune
+    rf.df$bestTune
+    
+    #Best result
+    rf.df$results[ which.max(rf.df$results$ROC), ]
+    
+    #display optimal threshold results:
+    roc.rf.df[opt.threshold.index, ]
+
+    #AUC
+    AUC.rf = as.numeric(performance(prediction.list.rf, "auc")@y.values)
+
+```
+
+### Support Vector Method
+
+```{r}
+set.seed(1337)
+   svm.df <- train(ca_cervix ~ ., data = train.dat, 
+                         trControl = tr.Control,
+                         method = "svmLinear", 
+                         metric = "ROC",
+                         preProcess = c("center", "scale"),
+                         tuneGrid =
+                         expand.grid(C = seq(0.5, 0.7, length = 50) )
+                         )
+```
+
+```{r}
+    #Compare prediction
+    prob.pred.svm<-predict(svm.df,newdata = test.dat, type = "prob")
+    prob.pred.svm<-prob.pred.svm[,2]
+    prediction.list.svm <- prediction(prob.pred.svm, labels = test.dat$ca_cervix)
+    perf.svm <- performance(prediction.list.svm, measure="tpr", x.measure="fpr")
+    
+    #Best ROC
+    perf.svm.x <- perf.svm@x.values[[1]]
+    perf.svm.y <- perf.svm@y.values[[1]]
+    perf.svm.cutoff <- prediction.list.svm@cutoffs[[1]]
+    svm.acc <- performance(prediction.list.svm, measure="acc")
+    svm.accuracy <- svm.acc@y.values[[1]]
+    
+    #create dataframe:
+    roc.svm.df <- data.frame(sensitivity = perf.svm.y,
+                         FPR = perf.svm.x,
+                         specificity = 1- perf.svm.x,
+                         accuracy = svm.accuracy,
+                         prob.cutoff = perf.svm.cutoff )
+    
+    #get optimal threshold:
+    opt.threshold.index <-  which.max(roc.svm.df$specificity + roc.svm.df$sensitivity)
+    
+    #
+    varImp(svm.df)
+    ggplot(varImp(svm.df))+
+      ggtitle("Support Vector Machine Variable Importance")+
+      theme_excel_new()
+    
+    # svm best tune
+    svm.df$bestTune
+    
+    #Best result
+    svm.df$results[ which.max(svm.df$results$ROC), ]
+    
+    #display optimal threshold results:
+    roc.svm.df[opt.threshold.index, ]
+
+    #AUC
+    AUC.svm = as.numeric(performance(prediction.list.svm, "auc")@y.values)
+```
+
+```{r}
+perf.tree.df<-data.frame(fpr=perf.tree.x,tpr=perf.tree.y,cutoff=round(perf.tree.cutoff,digits=3))
+perf.tree.df$Method<-"Tree"
+
+perf.elastic.df<-data.frame(fpr=perf.elastic.x,tpr=perf.elastic.y,cutoff=round(perf.elastic.cutoff, digits=3))
+perf.elastic.df$Method<-"Elastic"
+
+perf.rf.df<-data.frame(fpr=perf.rf.x,tpr=perf.rf.y,cutoff=round(perf.rf.cutoff,digits=3))
+perf.rf.df$Method<-"Random Forest"
+
+perf.svm.df<-data.frame(fpr=perf.svm.x,tpr=perf.svm.y, cutoff=round(perf.svm.cutoff,digits=3))
+perf.svm.df$Method<-"Support Vector Machine"
+
+perf.all.df<-rbind(perf.elastic.df,perf.tree.df,perf.rf.df,perf.svm.df)
+
+ggplot(perf.all.df, aes(x = fpr, y = tpr, color = Method)) +
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, lty = 3) +
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate") +
+  ggtitle("ROC Curve") +
+  facet_wrap(~Method)+
+  geom_ribbon(data = perf.all.df,aes(x=fpr,ymax=tpr,ymin=0, fill= Method), alpha=0.5)+
+  theme_excel_new()
+  
+ggplot(perf.all.df, aes(x = fpr, y = tpr, color = Method)) +
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, lty = 3) +
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate") +
+  ggtitle("ROC Curve") +
+  geom_ribbon(data = perf.all.df,aes(x=fpr,ymax=tpr,ymin=0, fill= Method), alpha=0.35)+
+  theme_excel_new()
+
+#Tree ROC
+ggplot(perf.tree.df, aes(x = fpr, y = tpr, color=Method) )+
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, lty = 3) +
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate") +
+  ggtitle("Tree ROC Curve") +
+  geom_ribbon(data = perf.tree.df,aes(x=fpr,ymax=tpr,ymin=0),fill="darkorchid3", alpha=0.35)+
+  scale_color_manual(values="darkorchid3")+
+  theme_excel_new()+
+  theme(legend.position = "none")
+
+#Elastic ROC 
+ggplot(perf.elastic.df, aes(x = fpr, y = tpr, color=Method) )+
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, lty = 3) +
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate") +
+  ggtitle("Elastic ROC Curve") +
+  geom_ribbon(data = perf.elastic.df,aes(x=fpr,ymax=tpr,ymin=0),fill="red", alpha=0.35)+
+  scale_color_manual(values="red")+
+  theme_excel_new()+
+  theme(legend.position = "none")
+
+#Random Forest ROC
+ggplot(perf.rf.df, aes(x = fpr, y = tpr, color=Method) )+
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, lty = 3) +
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate") +
+  ggtitle("Random Forest ROC Curve") +
+  geom_ribbon(data = perf.rf.df,aes(x=fpr,ymax=tpr,ymin=0),fill="chartreuse4", alpha=0.35)+
+  scale_color_manual(values="chartreuse4")+
+  theme_excel_new()+
+  theme(legend.position = "none")
+
+#SVM ROC
+ggplot(perf.svm.df, aes(x = fpr, y = tpr, color=Method) )+
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, lty = 3) +
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate") +
+  ggtitle("Support Vector Machine ROC Curve") +
+  geom_ribbon(data = perf.svm.df,aes(x=fpr,ymax=tpr,ymin=0),fill="cyan3", alpha=0.35)+
+  scale_color_manual(values="cyan3")+
+  theme_excel_new()+
+  theme(legend.position = "none")
+
+Method<-c("Tree","Elastic","Random Forest","Support Vector Machine")
+AUC<-c(AUC.tree,AUC.elastic,AUC.rf,AUC.svm)
+AUC.df<-data.frame(Method,AUC)
+AUC.df
+
+```
+### Interitem correlation
+```{r}
+corr.df<-cor(cerv.df)
+corrplot(corr.df,tl.col = "black",type="upper",method="number",number.cex=.5)
+
+corr2.df<-cor(cerv2.df)
+corrplot(corr2.df,tl.col = "black",type="upper",method="number",number.cex=.5)
+```
+
